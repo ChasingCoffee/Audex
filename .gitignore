@@ -1,0 +1,15 @@
+Audex.code-workspace
+.claude
+.planning
+installer
+src/Audex/bin
+src/Audex/obj
+scripts/check*.ps1
+scripts/deep-diag.ps1
+scripts/fix-explorer.ps1
+scripts/test-com.ps1
+src/Audex/native/x64/*.dll
+tests/Audex.Tests/bin
+tests/Audex.Tests/obj
+diag.log
+nul
