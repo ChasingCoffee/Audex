@@ -29,7 +29,8 @@ namespace Audex.Audio
         private AudioPlayerState _state = AudioPlayerState.Idle;
         private WasapiProcedure? _wasapiProc;
         private int _endOfStreamFlag;
-        private bool _isInitialized;
+        private bool _isInitialized;   // Bass.Init(0) (NoSound core) succeeded — persists across device switches
+        private bool _wasapiReady;     // WASAPI + mixer are currently set up and usable by LoadFile/playback
         private double _totalDurationSeconds;
         private bool _disposed;
         private int _wasapiFreq;
@@ -67,6 +68,9 @@ namespace Audex.Audio
         /// <summary>Gets the WASAPI device index currently in use, or -1 for the default device.</summary>
         public int CurrentDeviceIndex => _currentDeviceIndex;
 
+        /// <summary>Gets whether WASAPI output and the mixer are currently set up and usable by LoadFile/playback.</summary>
+        public bool IsWasapiReady => _wasapiReady;
+
         // --- Initialization ---
 
         /// <summary>
@@ -102,49 +106,18 @@ namespace Audex.Audio
                 // Load BASS plugins for extended format support (AAC, WMA, Opus)
                 PluginManager.LoadPlugins(assemblyDir);
 
-                // Initialize WASAPI in shared mode on requested output device
-                _currentDeviceIndex = deviceIndex;
-                if (!BassWasapi.Init(deviceIndex, 0, 0, WasapiInitFlags.Shared, 0f, 0f, _wasapiProc, IntPtr.Zero))
-                {
-                    Logger.Error($"[AudioPlayer] BassWasapi.Init failed: {Bass.LastError}");
-                    Bass.Free();
-                    SetState(AudioPlayerState.Error);
-                    return false;
-                }
-
-                // Get the actual WASAPI device format for the mixer
-                var wasapiInfo = BassWasapi.Info;
-                _wasapiFreq = wasapiInfo.Frequency;
-                _wasapiChannels = wasapiInfo.Channels;
-                Logger.Info($"[AudioPlayer] WASAPI device index={deviceIndex}: {_wasapiFreq}Hz / {_wasapiChannels}ch");
-
-                // Create a mixer stream at the WASAPI device's sample rate/channels.
-                // BassMix handles sample rate conversion and channel mixing automatically.
-                _mixerStream = BassMix.CreateMixerStream(
-                    _wasapiFreq, _wasapiChannels,
-                    BassFlags.Decode | BassFlags.Float);
-
-                if (_mixerStream == 0)
-                {
-                    Logger.Error($"[AudioPlayer] CreateMixerStream failed: {Bass.LastError}");
-                    BassWasapi.Free();
-                    Bass.Free();
-                    SetState(AudioPlayerState.Error);
-                    return false;
-                }
-
-                if (!BassWasapi.Start())
-                {
-                    Logger.Error($"[AudioPlayer] BassWasapi.Start() failed: {Bass.LastError}");
-                    Bass.StreamFree(_mixerStream);
-                    _mixerStream = 0;
-                    BassWasapi.Free();
-                    Bass.Free();
-                    SetState(AudioPlayerState.Error);
-                    return false;
-                }
-
+                // Bass core is alive from here on, regardless of whether WASAPI setup below succeeds.
                 _isInitialized = true;
+
+                if (!SetupWasapiAndMixer(deviceIndex))
+                {
+                    // No usable output device at all — nothing left to keep the core alive for.
+                    Bass.Free();
+                    _isInitialized = false;
+                    SetState(AudioPlayerState.Error);
+                    return false;
+                }
+
                 Logger.Info("[AudioPlayer] Initialized — BASS NoSound + WASAPI shared + BassMix");
                 return true;
             }
@@ -154,6 +127,53 @@ namespace Audex.Audio
                 SetState(AudioPlayerState.Error);
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Initializes WASAPI shared-mode output plus the BassMix mixer for the given device,
+        /// and starts output. Does not touch Bass.Init — safe to call repeatedly to (re)establish
+        /// or recover WASAPI output while the Bass core stays alive. Sets <see cref="IsWasapiReady"/>
+        /// and <see cref="CurrentDeviceIndex"/> on success. Leaves WASAPI/mixer freed on failure.
+        /// </summary>
+        private bool SetupWasapiAndMixer(int deviceIndex)
+        {
+            if (!BassWasapi.Init(deviceIndex, 0, 0, WasapiInitFlags.Shared, 0f, 0f, _wasapiProc, IntPtr.Zero))
+            {
+                Logger.Error($"[AudioPlayer] BassWasapi.Init({deviceIndex}) failed: {Bass.LastError}");
+                return false;
+            }
+
+            // Get the actual WASAPI device format for the mixer
+            var wasapiInfo = BassWasapi.Info;
+            _wasapiFreq = wasapiInfo.Frequency;
+            _wasapiChannels = wasapiInfo.Channels;
+
+            // Create a mixer stream at the WASAPI device's sample rate/channels.
+            // BassMix handles sample rate conversion and channel mixing automatically.
+            _mixerStream = BassMix.CreateMixerStream(
+                _wasapiFreq, _wasapiChannels,
+                BassFlags.Decode | BassFlags.Float);
+
+            if (_mixerStream == 0)
+            {
+                Logger.Error($"[AudioPlayer] CreateMixerStream failed: {Bass.LastError}");
+                BassWasapi.Free();
+                return false;
+            }
+
+            if (!BassWasapi.Start())
+            {
+                Logger.Error($"[AudioPlayer] BassWasapi.Start() failed: {Bass.LastError}");
+                Bass.StreamFree(_mixerStream);
+                _mixerStream = 0;
+                BassWasapi.Free();
+                return false;
+            }
+
+            _currentDeviceIndex = deviceIndex;
+            _wasapiReady = true;
+            Logger.Info($"[AudioPlayer] WASAPI ready — device {deviceIndex}: {_wasapiFreq}Hz / {_wasapiChannels}ch");
+            return true;
         }
 
         // --- Stream lifecycle ---
@@ -213,6 +233,8 @@ namespace Audex.Audio
         {
             if (!_isInitialized)
                 throw new InvalidOperationException("AudioPlayer not initialized. Call Initialize() first.");
+            if (!_wasapiReady)
+                throw new InvalidOperationException("Audio output device is unavailable.");
 
             // Stop and free any existing stream
             if (_state == AudioPlayerState.Playing || _state == AudioPlayerState.Paused
@@ -404,75 +426,50 @@ namespace Audex.Audio
         /// </summary>
         public bool SwitchDevice(int deviceIndex)
         {
+            // Only the Bass core needs to be alive to attempt this — deliberately does NOT require
+            // _wasapiReady, so a previously-failed switch (e.g. device was temporarily unplugged)
+            // can be retried on the next file instead of staying broken for the rest of the session.
             if (!_isInitialized) return false;
-            if (deviceIndex == _currentDeviceIndex) return true; // no-op
+            if (deviceIndex == _currentDeviceIndex && _wasapiReady) return true; // already there and healthy
 
             Logger.Info($"[AudioPlayer] Switching WASAPI device from {_currentDeviceIndex} to {deviceIndex}");
 
             // 1. Stop current playback and free decode stream
             StopAndFreeStream();
 
-            // 2. Stop and free WASAPI
-            BassWasapi.Stop();
-            BassWasapi.Free();
-
-            // 3. Free old mixer
-            if (_mixerStream != 0)
+            // 2. Tear down the previous WASAPI/mixer state, if any was actually up
+            if (_wasapiReady)
             {
-                Bass.StreamFree(_mixerStream);
-                _mixerStream = 0;
-            }
-
-            // 4. Reinit WASAPI with new device
-            if (!BassWasapi.Init(deviceIndex, 0, 0, WasapiInitFlags.Shared, 0f, 0f, _wasapiProc, IntPtr.Zero))
-            {
-                Logger.Error($"[AudioPlayer] SwitchDevice: BassWasapi.Init({deviceIndex}) failed: {Bass.LastError}. Falling back to default.");
-                // Fallback to default device
-                if (!BassWasapi.Init(-1, 0, 0, WasapiInitFlags.Shared, 0f, 0f, _wasapiProc, IntPtr.Zero))
+                BassWasapi.Stop();
+                BassWasapi.Free();
+                if (_mixerStream != 0)
                 {
-                    Logger.Error($"[AudioPlayer] SwitchDevice: Fallback to default also failed: {Bass.LastError}");
-                    _isInitialized = false;
-                    return false;
+                    Bass.StreamFree(_mixerStream);
+                    _mixerStream = 0;
                 }
-                _currentDeviceIndex = -1;
+                _wasapiReady = false;
             }
-            else
+
+            // 3. Try the requested device
+            if (SetupWasapiAndMixer(deviceIndex))
             {
-                _currentDeviceIndex = deviceIndex;
+                Logger.Info($"[AudioPlayer] SwitchDevice complete — device {_currentDeviceIndex}");
+                return true;
             }
 
-            // 5. Get new device format
-            var wasapiInfo = BassWasapi.Info;
-            _wasapiFreq = wasapiInfo.Frequency;
-            _wasapiChannels = wasapiInfo.Channels;
-            Logger.Info($"[AudioPlayer] New WASAPI device: {_wasapiFreq}Hz / {_wasapiChannels}ch");
-
-            // 6. Recreate mixer at new device's sample rate
-            _mixerStream = BassMix.CreateMixerStream(
-                _wasapiFreq, _wasapiChannels,
-                BassFlags.Decode | BassFlags.Float);
-
-            if (_mixerStream == 0)
+            // 4. Fall back to the default device
+            Logger.Error($"[AudioPlayer] SwitchDevice: device {deviceIndex} failed. Falling back to default.");
+            if (SetupWasapiAndMixer(-1))
             {
-                Logger.Error($"[AudioPlayer] SwitchDevice: CreateMixerStream failed: {Bass.LastError}");
-                BassWasapi.Free();
-                _isInitialized = false;
-                return false;
+                Logger.Info("[AudioPlayer] SwitchDevice fell back to the default output device");
+                return true;
             }
 
-            // 7. Restart WASAPI output
-            if (!BassWasapi.Start())
-            {
-                Logger.Error($"[AudioPlayer] SwitchDevice: BassWasapi.Start() failed: {Bass.LastError}");
-                Bass.StreamFree(_mixerStream);
-                _mixerStream = 0;
-                BassWasapi.Free();
-                _isInitialized = false;
-                return false;
-            }
-
-            Logger.Info($"[AudioPlayer] SwitchDevice complete — device {_currentDeviceIndex}");
-            return true;
+            // 5. No usable output device at all. Bass core stays alive so this can be retried later
+            // (e.g. next file, after the user reconnects an audio device) via another SwitchDevice call.
+            Logger.Error($"[AudioPlayer] SwitchDevice: fallback to default also failed: {Bass.LastError}");
+            SetState(AudioPlayerState.Error);
+            return false;
         }
 
         // --- End-of-stream polling ---
@@ -589,6 +586,7 @@ namespace Audex.Audio
             Bass.Free();
 
             _isInitialized = false;
+            _wasapiReady = false;
             Logger.Info("[AudioPlayer] Shutdown complete");
         }
 

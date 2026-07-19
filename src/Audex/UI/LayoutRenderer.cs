@@ -350,7 +350,7 @@ namespace Audex.UI
                     keyValue = "\u2014";
                     keyAnnotation = "(unable to detect)";
                     keyValueBrush = new SolidBrush(Color.FromArgb(128, secondaryTextColor));
-                    keyAnnotationBrush = keyValueBrush;
+                    keyAnnotationBrush = new SolidBrush(Color.FromArgb(128, secondaryTextColor));
                 }
                 else if (!string.IsNullOrEmpty(info.Key))
                 {
@@ -367,7 +367,7 @@ namespace Audex.UI
                     keyValue = "\u2014";
                     keyAnnotation = "(unable to detect)";
                     keyValueBrush = new SolidBrush(secondaryTextColor);
-                    keyAnnotationBrush = keyValueBrush;
+                    keyAnnotationBrush = new SolidBrush(secondaryTextColor);
                 }
                 else
                 {
@@ -383,7 +383,6 @@ namespace Audex.UI
                     {
                         DrawAnnotation(g, bodyFont, aBrush, annotationColX, yOffset, bounds, keyAnnotation);
                     }
-                    keyAnnotationBrush = null; // prevent double-dispose
                 }
                 yOffset += iLineH;
 
@@ -425,7 +424,7 @@ namespace Audex.UI
                     bpmValue = "\u2014";
                     bpmAnnotation = "(unable to detect)";
                     bpmValueBrush = new SolidBrush(Color.FromArgb(128, secondaryTextColor));
-                    bpmAnnotationBrush = bpmValueBrush;
+                    bpmAnnotationBrush = new SolidBrush(Color.FromArgb(128, secondaryTextColor));
                 }
                 else if (info.Bpm.HasValue)
                 {
@@ -442,7 +441,7 @@ namespace Audex.UI
                     bpmValue = "\u2014";
                     bpmAnnotation = "(unable to detect)";
                     bpmValueBrush = new SolidBrush(secondaryTextColor);
-                    bpmAnnotationBrush = bpmValueBrush;
+                    bpmAnnotationBrush = new SolidBrush(secondaryTextColor);
                 }
                 else
                 {
@@ -458,7 +457,6 @@ namespace Audex.UI
                     {
                         DrawAnnotation(g, bodyFont, aBrush, annotationColX, yOffset, bounds, bpmAnnotation);
                     }
-                    bpmAnnotationBrush = null;
                 }
 
                 if (bpmValueBrush != valueBrush)
