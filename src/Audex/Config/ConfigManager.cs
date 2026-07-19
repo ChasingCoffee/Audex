@@ -46,7 +46,7 @@ namespace Audex.Config
 
             try
             {
-                string json = File.ReadAllText(jsonPath);
+                string json = ReadAllTextWithRetry(jsonPath);
                 AppConfig? config = JsonConvert.DeserializeObject<AppConfig>(json);
                 if (config == null)
                     return new AppConfig();
@@ -76,11 +76,15 @@ namespace Audex.Config
         /// <summary>
         /// Saves the configuration to config.json.
         /// Ensures the config directory exists before writing.
+        /// Writes to a temp file and atomically swaps it into place, so a concurrent reader
+        /// (e.g. another prevhost.exe instance previewing a different file at the same time)
+        /// never observes a partially-written file.
         /// </summary>
         public static void Save(AppConfig config)
         {
             string jsonPath = PathHelper.GetJsonConfigPath();
             string configDir = Path.GetDirectoryName(jsonPath)!;
+            string? tempPath = null;
 
             try
             {
@@ -90,13 +94,52 @@ namespace Audex.Config
                 }
 
                 string json = JsonConvert.SerializeObject(config, JsonSettings);
-                File.WriteAllText(jsonPath, json);
+
+                tempPath = jsonPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                File.WriteAllText(tempPath, json);
+
+                if (File.Exists(jsonPath))
+                    File.Replace(tempPath, jsonPath, null);
+                else
+                    File.Move(tempPath, jsonPath);
+                tempPath = null; // consumed by Replace/Move
+
                 Logger.Info($"Configuration saved to {jsonPath}");
             }
             catch (Exception ex)
             {
                 Logger.Error($"Failed to save configuration: {ex.Message}", ex);
             }
+            finally
+            {
+                if (tempPath != null)
+                {
+                    try { File.Delete(tempPath); } catch { }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Reads a file's full text, retrying briefly on IOException. Guards against the narrow
+        /// window where a concurrent process's atomic Save (File.Replace) holds a transient
+        /// exclusive handle on the same path.
+        /// </summary>
+        private static string ReadAllTextWithRetry(string path)
+        {
+            const int maxAttempts = 3;
+            for (int attempt = 1; attempt < maxAttempts; attempt++)
+            {
+                try
+                {
+                    return File.ReadAllText(path);
+                }
+                catch (IOException)
+                {
+                    System.Threading.Thread.Sleep(15);
+                }
+            }
+
+            return File.ReadAllText(path); // let a final failure propagate normally
         }
 
         /// <summary>

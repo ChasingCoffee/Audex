@@ -47,7 +47,10 @@ namespace Audex.UI
         // --- Audio player state ---
         private AudioPlayer? _player;
         private Timer? _positionTimer;
-        private const int POSITION_TIMER_INTERVAL_MS = 250;
+        // ~30fps: fast enough that the playhead reads as a continuous sweep rather than visible
+        // steps. The redraw this triggers (WaveformRenderer.Draw + control bar) is cheap — a few
+        // hundred clipped GDI+ fills — so there's plenty of headroom below any real CPU concern.
+        private const int POSITION_TIMER_INTERVAL_MS = 33;
 
         // --- Control interaction state ---
         private HitZone _hoveredZone = HitZone.None;

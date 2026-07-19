@@ -11,6 +11,12 @@
     <Nullable>enable</Nullable>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <!-- Deliberately NOT strong-named: none of the ManagedBass* NuGet packages are signed, and a
+         strong-named Audex.dll cannot load unsigned dependencies under prevhost.exe's hosting
+         (throws FileLoadException: "A strongly-named assembly is required" on every BASS call,
+         which blanks the preview pane). Unsigned + regasm /codebase is the correct, standard
+         pattern for this kind of file-based (non-GAC) COM registration — RegAsm's RA0000
+         "unsigned assembly with /codebase" warning is expected and safe to ignore here. -->
   </PropertyGroup>
 
   <ItemGroup>

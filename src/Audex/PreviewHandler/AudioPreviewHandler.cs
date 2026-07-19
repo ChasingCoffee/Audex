@@ -27,7 +27,7 @@ namespace Audex.PreviewHandler
     [ClassInterface(ClassInterfaceType.None)]
     [Guid(ComGuids.AudioPreviewHandler)]
     [ProgId("Audex.AudioPreviewHandler")]
-    public class AudioPreviewHandler : IPreviewHandler, IInitializeWithStream, IObjectWithSite, IOleWindow
+    public class AudioPreviewHandler : IPreviewHandler, IInitializeWithStream, IObjectWithSite, IOleWindow, IDisposable
     {
         // IInitializeWithStream state
         private IStream? _stream;
@@ -59,6 +59,8 @@ namespace Audex.PreviewHandler
 
         // Current file data — copied from IStream, held until Unload
         private byte[]? _fileData;
+
+        private bool _disposed;
 
         // Constants
         private const int S_OK = 0;
@@ -146,6 +148,13 @@ namespace Audex.PreviewHandler
                 {
                     // Invalidate any in-flight preview callbacks bound to the previous stream.
                     Interlocked.Increment(ref _previewRequestId);
+
+                    // Some hosts may call Initialize again without an intervening Unload — release
+                    // the previous stream's COM reference before overwriting it, or it leaks.
+                    if (_stream != null && !ReferenceEquals(_stream, pstream))
+                    {
+                        try { Marshal.ReleaseComObject(_stream); } catch { }
+                    }
                     _stream = pstream;
 
                     try
@@ -263,7 +272,10 @@ namespace Audex.PreviewHandler
                     {
                         runImmediate = false;
                         debounceMs = Math.Max(0, ConfigManager.Load().DebounceMs);
-                        _debounceTimer = new System.Threading.Timer(_ => DoPreviewInternal(requestId), null, debounceMs, Timeout.Infinite);
+                        // Marshal onto the STA thread before touching _stream/_player — System.Threading.Timer
+                        // callbacks run on a raw ThreadPool thread, which never called CoInitializeEx and may
+                        // not share an apartment with the shell-provided IStream.
+                        _debounceTimer = new System.Threading.Timer(_ => InvokeOnUI(() => DoPreviewInternal(requestId)), null, debounceMs, Timeout.Infinite);
                     }
                 }
 
@@ -322,27 +334,29 @@ namespace Audex.PreviewHandler
                     });
 
                     // Copy IStream to byte array
-                    _fileData = CopyStreamToBytes(_stream);
+                    _fileData = CopyStreamToBytes(_stream, requestId);
                     if (!IsCurrentPreviewRequest(requestId) || !_showPreview)
                         return;
 
                     // Parse file header for bit depth (header parsers know actual bit depth;
-                    // BASS reports 32-bit float for decode streams)
-                    AudioFileInfo headerInfo = AudioHeaderParserFactory.Parse(_stream, _fileName, _fileSize);
+                    // BASS reports 32-bit float for decode streams). Parse from the bytes we just
+                    // buffered rather than re-reading the shell's IStream a second time.
+                    IStream headerSource = _fileData is { Length: > 0 }
+                        ? new InMemoryComStream(_fileData)
+                        : _stream;
+                    AudioFileInfo headerInfo = AudioHeaderParserFactory.Parse(headerSource, _fileName, _fileSize);
 
                     // Determine module format and check format support via PluginManager
                     string fileExt = Path.GetExtension(_fileName)?.ToLowerInvariant() ?? "";
                     bool isModule = PluginManager.IsModuleFormat(fileExt);
-                    string? formatError = null;
+                    bool formatSupported = PluginManager.IsFormatSupported(fileExt);
+                    string? unsupportedFormatReason = formatSupported ? null : PluginManager.GetUnsupportedReason(fileExt);
 
-                    if (!PluginManager.IsFormatSupported(fileExt))
-                    {
-                        formatError = PluginManager.GetUnsupportedReason(fileExt);
-                    }
-
-                    // Check if WASAPI device needs switching (user may have changed in settings)
+                    // Check if WASAPI device needs (re-)switching: either the user changed it in
+                    // settings, or a previous switch/init failed (e.g. device was disconnected) and
+                    // we should retry now rather than staying broken for the rest of the session.
                     int configDeviceIndex = ConfigManager.Load().WasapiDeviceIndex;
-                    if (configDeviceIndex != _player.CurrentDeviceIndex)
+                    if (configDeviceIndex != _player.CurrentDeviceIndex || !_player.IsWasapiReady)
                     {
                         bool switched = _player.SwitchDevice(configDeviceIndex);
                         if (switched)
@@ -353,6 +367,8 @@ namespace Audex.PreviewHandler
                             _player.SetMute(volConfig.IsMuted);
                         }
                     }
+
+                    string? formatError = ResolvePreLoadError(formatSupported, unsupportedFormatReason, _player.IsWasapiReady);
 
                     // Load file into AudioPlayer — get BASS-derived sample rate, channels, duration
                     int sampleRate = headerInfo.SampleRate;
@@ -524,10 +540,33 @@ namespace Audex.PreviewHandler
         }
 
         /// <summary>
+        /// Decides which error (if any) should block loading/playing the file, before LoadFile is
+        /// attempted. Format-unsupported takes precedence over device-unavailable, since it's the
+        /// more specific/actionable reason and remains true regardless of device state. Pulled out
+        /// as a pure function so the precedence rule is unit-testable without a real AudioPlayer.
+        /// </summary>
+        internal static string? ResolvePreLoadError(bool formatSupported, string? unsupportedFormatReason, bool wasapiReady)
+        {
+            if (!formatSupported)
+                return unsupportedFormatReason;
+
+            if (!wasapiReady)
+                return "Audio output device unavailable. Check your Windows sound settings.";
+
+            return null;
+        }
+
+        /// <summary>
         /// Copies the entire IStream to a byte array using 64KB chunks.
         /// Uses the Marshal-based IntPtr pattern from StreamHelper (COM IStream.Read takes IntPtr for bytesRead).
+        /// Runs on the STA thread (see DoPreview/InvokeOnUI), so for large/slow (e.g. network) files this
+        /// would otherwise block the same message pump the loading spinner depends on. To keep the UI
+        /// responsive, the message queue is pumped periodically. This is deliberately safe against the
+        /// reentrancy that opens up: requestId is checked before continuing, and if a reentrant Unload()
+        /// releases pstream mid-copy, the resulting COM exception is treated as a clean abandonment
+        /// (the caller already discards results for a stale requestId) rather than an error.
         /// </summary>
-        private byte[] CopyStreamToBytes(IStream pstream)
+        private byte[] CopyStreamToBytes(IStream pstream, int requestId)
         {
             // Seek to beginning
             pstream.Seek(0, 0, IntPtr.Zero); // STREAM_SEEK_SET = 0
@@ -535,16 +574,30 @@ namespace Audex.PreviewHandler
             var buffer = new byte[65536];
             using var ms = new MemoryStream();
 
+            const int chunksPerPump = 8; // pump the message queue roughly every 512KB
+            int chunksSincePump = 0;
+
             IntPtr bytesReadPtr = Marshal.AllocCoTaskMem(sizeof(int));
             try
             {
-                while (true)
+                while (IsCurrentPreviewRequest(requestId))
                 {
                     pstream.Read(buffer, buffer.Length, bytesReadPtr);
                     int bytesRead = Marshal.ReadInt32(bytesReadPtr);
                     if (bytesRead <= 0) break;
                     ms.Write(buffer, 0, bytesRead);
+
+                    if (++chunksSincePump >= chunksPerPump)
+                    {
+                        chunksSincePump = 0;
+                        Application.DoEvents();
+                    }
                 }
+            }
+            catch when (!IsCurrentPreviewRequest(requestId))
+            {
+                // pstream was released by a reentrant Unload() while we were pumping messages above —
+                // expected once the request is stale, not a real failure.
             }
             finally
             {
@@ -793,16 +846,58 @@ namespace Audex.PreviewHandler
 
         #endregion
 
-        #region Finalizer (BASS shutdown on unload)
+        #region IDisposable / Finalizer
+
+        /// <summary>
+        /// Deterministically tears down native resources. There is no shell-provided "goodbye"
+        /// hook for a COM preview handler (releasing the last CCW reference does not call
+        /// Dispose), so this exists mainly so an explicit caller (or future host) can trigger
+        /// prompt cleanup instead of waiting on GC finalization. Safe to call multiple times.
+        /// </summary>
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        private void Dispose(bool disposing)
+        {
+            if (_disposed) return;
+            _disposed = true;
+
+            if (disposing)
+            {
+                // These touch managed/COM objects and WinForms controls, so they must only run
+                // when we know we're not on the finalizer thread (no COM apartment, wrong thread
+                // for the control's HWND).
+                try { _debounceTimer?.Dispose(); } catch { }
+                try { _autoplayTimer?.Dispose(); } catch { }
+
+                if (_stream != null)
+                {
+                    try { Marshal.ReleaseComObject(_stream); } catch { }
+                    _stream = null;
+                }
+
+                try
+                {
+                    if (_previewWindow != null && _previewWindow.IsHandleCreated)
+                        _previewWindow.Invoke(new Action(() => _previewWindow.Dispose()));
+                    else
+                        _previewWindow?.Dispose();
+                }
+                catch { }
+            }
+
+            // Native BASS/WASAPI teardown: BASS is documented as callable from any thread, so
+            // this is safe to run unconditionally, including from the finalizer thread — it is
+            // the only cleanup that path can safely perform.
+            try { _player?.Shutdown(); } catch { }
+        }
 
         ~AudioPreviewHandler()
         {
-            try
-            {
-                // Full BASS shutdown when COM object is destroyed
-                _player?.Shutdown();
-            }
-            catch { }
+            Dispose(false);
         }
 
         #endregion
