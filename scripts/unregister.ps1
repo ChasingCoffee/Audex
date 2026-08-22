@@ -89,8 +89,15 @@ $backupPath = Join-Path $env:LOCALAPPDATA "Audex\prev-handlers.json"
 
 if (Test-Path $backupPath) {
     try {
-        $backup = Get-Content $backupPath -Encoding UTF8 | ConvertFrom-Json
-        foreach ($ext in $backup.PSObject.Properties) {
+        $storedBackup = Get-Content $backupPath -Encoding UTF8 | ConvertFrom-Json
+        $systemBackup = $storedBackup
+        $progIdBackup = $null
+        if ($storedBackup.PSObject.Properties.Name -contains "SystemFileAssociations") {
+            $systemBackup = $storedBackup.SystemFileAssociations
+            $progIdBackup = $storedBackup.ProgIdAssociations
+        }
+
+        foreach ($ext in $systemBackup.PSObject.Properties) {
             $extName = $ext.Name
             $previousClsid = $ext.Value
             if ($previousClsid) {
@@ -102,6 +109,22 @@ if (Test-Path $backupPath) {
                 Write-Host "  Restored: $extName -> $previousClsid" -ForegroundColor Cyan
             }
         }
+
+        if ($null -ne $progIdBackup) {
+            foreach ($entry in $progIdBackup.PSObject.Properties) {
+                $progId = $entry.Name
+                $previousClsid = $entry.Value
+                if ($previousClsid) {
+                    $progIdShellexPath = "Registry::HKCR\$progId\shellex\$previewHandlerIID"
+                    if (-not (Test-Path $progIdShellexPath)) {
+                        New-Item -Path $progIdShellexPath -Force | Out-Null
+                    }
+                    Set-ItemProperty $progIdShellexPath -Name "(default)" -Value $previousClsid
+                    Write-Host "  Restored ProgID: $progId -> $previousClsid" -ForegroundColor Cyan
+                }
+            }
+        }
+
         # Clean up backup file after successful restore
         Remove-Item $backupPath -Force -ErrorAction SilentlyContinue
         Write-Host "  Backup file removed" -ForegroundColor Green

@@ -67,6 +67,7 @@ namespace Audex.PreviewHandler
         private const int S_FALSE = 1;
         private const int E_NOTIMPL = unchecked((int)0x80004001);
         private const int E_NOINTERFACE = unchecked((int)0x80004002);
+        private const int MaxPreviewFileBytes = 256 * 1024 * 1024;
 
         // Keyboard message constants
         private const uint WM_KEYDOWN = 0x0100;
@@ -568,43 +569,21 @@ namespace Audex.PreviewHandler
         /// </summary>
         private byte[] CopyStreamToBytes(IStream pstream, int requestId)
         {
-            // Seek to beginning
-            pstream.Seek(0, 0, IntPtr.Zero); // STREAM_SEEK_SET = 0
-
-            var buffer = new byte[65536];
-            using var ms = new MemoryStream();
-
-            const int chunksPerPump = 8; // pump the message queue roughly every 512KB
-            int chunksSincePump = 0;
-
-            IntPtr bytesReadPtr = Marshal.AllocCoTaskMem(sizeof(int));
             try
             {
-                while (IsCurrentPreviewRequest(requestId))
-                {
-                    pstream.Read(buffer, buffer.Length, bytesReadPtr);
-                    int bytesRead = Marshal.ReadInt32(bytesReadPtr);
-                    if (bytesRead <= 0) break;
-                    ms.Write(buffer, 0, bytesRead);
-
-                    if (++chunksSincePump >= chunksPerPump)
-                    {
-                        chunksSincePump = 0;
-                        Application.DoEvents();
-                    }
-                }
+                return StreamHelper.ReadToEndBounded(
+                    pstream,
+                    _fileSize,
+                    MaxPreviewFileBytes,
+                    () => IsCurrentPreviewRequest(requestId),
+                    Application.DoEvents);
             }
             catch when (!IsCurrentPreviewRequest(requestId))
             {
                 // pstream was released by a reentrant Unload() while we were pumping messages above —
                 // expected once the request is stale, not a real failure.
+                return Array.Empty<byte>();
             }
-            finally
-            {
-                Marshal.FreeCoTaskMem(bytesReadPtr);
-            }
-
-            return ms.ToArray();
         }
 
         public void Unload()

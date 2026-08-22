@@ -34,6 +34,101 @@ if (-not (Test-Path $dllPath)) {
 }
 Write-Host "Using DLL: $dllPath"
 
+# Step 2.5: Determine associations and back up existing handlers BEFORE RegAsm.
+# RegAsm invokes PreviewHandlerRegistration.Register, which writes associations by default.
+# Capture them first, then opt the callback out so this script can apply the plugin-aware list.
+Write-Host "Determining supported extensions..."
+
+$extensions = @(".wav", ".mp3", ".flac", ".aiff", ".aif", ".ogg")
+$extensions += @(".mod", ".xm", ".it", ".s3m")
+$outputDir = Split-Path $dllPath
+
+if (Test-Path (Join-Path $outputDir "bass_aac.dll")) {
+    $extensions += @(".aac", ".m4a")
+    Write-Host "  bass_aac.dll found -- registering .aac, .m4a" -ForegroundColor Green
+} else {
+    Write-Host "  bass_aac.dll NOT found -- skipping .aac, .m4a registration" -ForegroundColor Yellow
+}
+
+if (Test-Path (Join-Path $outputDir "basswma.dll")) {
+    $extensions += @(".wma")
+    Write-Host "  basswma.dll found -- registering .wma" -ForegroundColor Green
+} else {
+    Write-Host "  basswma.dll NOT found -- skipping .wma registration" -ForegroundColor Yellow
+}
+
+if (Test-Path (Join-Path $outputDir "bassopus.dll")) {
+    $extensions += @(".opus")
+    Write-Host "  bassopus.dll found -- registering .opus" -ForegroundColor Green
+} else {
+    Write-Host "  bassopus.dll NOT found -- skipping .opus registration" -ForegroundColor Yellow
+}
+
+Write-Host "  Registering $($extensions.Count) extensions: $($extensions -join ', ')" -ForegroundColor Cyan
+Write-Host "Backing up existing preview handler registrations..."
+
+$backupPath = Join-Path $env:LOCALAPPDATA "Audex\prev-handlers.json"
+$systemAssociationBackup = @{}
+$progIdBackup = @{}
+
+function Copy-JsonPropertiesToDictionary {
+    param($Source, [System.Collections.IDictionary]$Destination)
+    if ($null -eq $Source) { return }
+    foreach ($property in $Source.PSObject.Properties) {
+        $Destination[$property.Name] = [string]$property.Value
+    }
+}
+
+# Preserve the original backup across upgrades/re-registration. Older Audex backups used
+# a flat extension -> CLSID object, so accept that shape as SystemFileAssociations data.
+if (Test-Path $backupPath) {
+    try {
+        $existingBackup = Get-Content $backupPath -Encoding UTF8 | ConvertFrom-Json
+        if ($existingBackup.PSObject.Properties.Name -contains "SystemFileAssociations") {
+            Copy-JsonPropertiesToDictionary $existingBackup.SystemFileAssociations $systemAssociationBackup
+            Copy-JsonPropertiesToDictionary $existingBackup.ProgIdAssociations $progIdBackup
+        } else {
+            Copy-JsonPropertiesToDictionary $existingBackup $systemAssociationBackup
+        }
+    }
+    catch {
+        Write-Host "  Warning: existing handler backup could not be read: $_" -ForegroundColor Yellow
+    }
+}
+
+foreach ($ext in $extensions) {
+    $sysAssocPath = "Registry::HKCR\SystemFileAssociations\$ext\shellex\$previewHandlerIID"
+    if (Test-Path $sysAssocPath) {
+        $existingClsid = (Get-ItemProperty $sysAssocPath -ErrorAction SilentlyContinue).'(default)'
+        if ($existingClsid -and $existingClsid -ne $clsid -and -not $systemAssociationBackup.ContainsKey($ext)) {
+            $systemAssociationBackup[$ext] = $existingClsid
+        }
+    }
+
+    $extPath = "Registry::HKCR\$ext"
+    if (Test-Path $extPath) {
+        $progId = (Get-ItemProperty $extPath -ErrorAction SilentlyContinue).'(default)'
+        if ($progId) {
+            $progIdShellexPath = "Registry::HKCR\$progId\shellex\$previewHandlerIID"
+            if (Test-Path $progIdShellexPath) {
+                $existingProgIdClsid = (Get-ItemProperty $progIdShellexPath -ErrorAction SilentlyContinue).'(default)'
+                if ($existingProgIdClsid -and $existingProgIdClsid -ne $clsid -and -not $progIdBackup.ContainsKey($progId)) {
+                    $progIdBackup[$progId] = $existingProgIdClsid
+                }
+            }
+        }
+    }
+}
+
+$backupDir = Split-Path $backupPath
+if (-not (Test-Path $backupDir)) { New-Item $backupDir -ItemType Directory -Force | Out-Null }
+$backup = [ordered]@{
+    SystemFileAssociations = $systemAssociationBackup
+    ProgIdAssociations = $progIdBackup
+}
+$backup | ConvertTo-Json -Depth 4 | Set-Content $backupPath -Encoding UTF8
+Write-Host "  Preserved $($systemAssociationBackup.Count) system and $($progIdBackup.Count) ProgID handler(s)" -ForegroundColor Green
+
 # Step 3: Register COM class with regasm
 $regasm = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\RegAsm.exe"
 if (-not (Test-Path $regasm)) {
@@ -42,7 +137,24 @@ if (-not (Test-Path $regasm)) {
 }
 
 Write-Host "Registering COM component..."
-& $regasm $dllPath /codebase /tlb 2>&1 | Write-Host
+$previousSkipExtensionRegistration = $env:AUDEX_SKIP_EXTENSION_REGISTRATION
+$env:AUDEX_SKIP_EXTENSION_REGISTRATION = "1"
+try {
+    & $regasm $dllPath /codebase /tlb 2>&1 | Write-Host
+    $regasmExitCode = $LASTEXITCODE
+}
+finally {
+    if ($null -eq $previousSkipExtensionRegistration) {
+        Remove-Item Env:AUDEX_SKIP_EXTENSION_REGISTRATION -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:AUDEX_SKIP_EXTENSION_REGISTRATION = $previousSkipExtensionRegistration
+    }
+}
+if ($regasmExitCode -ne 0) {
+    Write-Error "RegAsm failed with exit code $regasmExitCode."
+    exit 1
+}
 Start-Sleep -Milliseconds 200
 
 # Step 4: Set preview handler registry entries
@@ -76,65 +188,6 @@ if (-not (Test-Path $phPath)) {
 }
 New-ItemProperty -Path $phPath -Name $clsid -Value "Audex" -PropertyType String -Force | Out-Null
 Write-Host "  PreviewHandlers entry added (HKLM)" -ForegroundColor Green
-
-# Step 5.5: Build the dynamic extension list based on plugin DLL presence
-Write-Host "Determining supported extensions..."
-
-# Core extensions -- always registered (no plugin required; handled by core BASS)
-$extensions = @(".wav", ".mp3", ".flac", ".aiff", ".aif", ".ogg")
-
-# Module format extensions -- always registered (built into core BASS via MusicLoad, no plugin needed)
-$extensions += @(".mod", ".xm", ".it", ".s3m")
-
-# Plugin-dependent extensions -- only register if the corresponding plugin DLL is present
-$outputDir = Split-Path $dllPath  # Same directory as Audex.dll
-
-# AAC/M4A require bass_aac.dll
-if (Test-Path (Join-Path $outputDir "bass_aac.dll")) {
-    $extensions += @(".aac", ".m4a")
-    Write-Host "  bass_aac.dll found -- registering .aac, .m4a" -ForegroundColor Green
-} else {
-    Write-Host "  bass_aac.dll NOT found -- skipping .aac, .m4a registration" -ForegroundColor Yellow
-}
-
-# WMA requires basswma.dll
-if (Test-Path (Join-Path $outputDir "basswma.dll")) {
-    $extensions += @(".wma")
-    Write-Host "  basswma.dll found -- registering .wma" -ForegroundColor Green
-} else {
-    Write-Host "  basswma.dll NOT found -- skipping .wma registration" -ForegroundColor Yellow
-}
-
-# Opus requires bassopus.dll
-if (Test-Path (Join-Path $outputDir "bassopus.dll")) {
-    $extensions += @(".opus")
-    Write-Host "  bassopus.dll found -- registering .opus" -ForegroundColor Green
-} else {
-    Write-Host "  bassopus.dll NOT found -- skipping .opus registration" -ForegroundColor Yellow
-}
-
-Write-Host "  Registering $($extensions.Count) extensions: $($extensions -join ', ')" -ForegroundColor Cyan
-
-# Step 5.6: Backup existing preview handler registrations before overwriting
-# Written to %LOCALAPPDATA%\Audex\prev-handlers.json
-Write-Host "Backing up existing preview handler registrations..."
-$backupPath = Join-Path $env:LOCALAPPDATA "Audex\prev-handlers.json"
-$backup = @{}
-
-foreach ($ext in $extensions) {
-    $sysAssocPath = "Registry::HKCR\SystemFileAssociations\$ext\shellex\$previewHandlerIID"
-    if (Test-Path $sysAssocPath) {
-        $existingClsid = (Get-ItemProperty $sysAssocPath -ErrorAction SilentlyContinue).'(default)'
-        if ($existingClsid -and $existingClsid -ne $clsid) {
-            $backup[$ext] = $existingClsid
-        }
-    }
-}
-
-$backupDir = Split-Path $backupPath
-if (-not (Test-Path $backupDir)) { New-Item $backupDir -ItemType Directory -Force | Out-Null }
-$backup | ConvertTo-Json | Set-Content $backupPath -Encoding UTF8
-Write-Host "  Backed up $($backup.Count) previous handler(s) to $backupPath" -ForegroundColor Green
 
 # Step 6: Register file extension associations
 foreach ($ext in $extensions) {

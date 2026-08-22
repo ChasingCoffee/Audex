@@ -49,7 +49,10 @@ namespace Audex.FileReader
                 }
 
                 // Read fmt chunk data (minimum 16 bytes)
-                byte[] fmtData = StreamHelper.ReadBytes(stream, Math.Min(fmtChunk.Value.Size, 1024));
+                if (fmtChunk.Value.Size < 16)
+                    return CreateError(fileName, fileSize, "fmt chunk is too small");
+
+                byte[] fmtData = StreamHelper.ReadBytes(stream, (int)Math.Min(fmtChunk.Value.Size, 1024L));
 
                 // Parse fmt chunk
                 ushort audioFormat = BitConverter.ToUInt16(fmtData, 0);  // 1 = PCM
@@ -99,12 +102,18 @@ namespace Audex.FileReader
         {
             try
             {
+                stream.Stat(out System.Runtime.InteropServices.ComTypes.STATSTG stat, 1); // STATFLAG_NONAME
+                long streamLength = stat.cbSize;
+                if (streamLength < 20)
+                    return null;
+
                 // Start after RIFF header (12 bytes)
                 stream.Seek(12, 0, IntPtr.Zero);
+                long chunkPosition = 12;
 
                 byte[] chunkHeader = new byte[8];
 
-                while (true)
+                while (chunkPosition <= streamLength - chunkHeader.Length)
                 {
                     // Read chunk header (4 bytes ID + 4 bytes size)
                     int bytesRead = StreamHelper.TryReadBytes(stream, chunkHeader, 8);
@@ -115,20 +124,28 @@ namespace Audex.FileReader
                     }
 
                     string chunkId = Encoding.ASCII.GetString(chunkHeader, 0, 4);
-                    uint chunkSize = BitConverter.ToUInt32(chunkHeader, 4);
+                    long chunkSize = BitConverter.ToUInt32(chunkHeader, 4);
+                    long dataPosition = checked(chunkPosition + chunkHeader.Length);
+                    long paddedSize = checked(chunkSize + (chunkSize & 1L));
+                    long nextChunkPosition = checked(dataPosition + paddedSize);
+
+                    // Reject truncated/overflowing chunks and, critically, any layout that does
+                    // not advance. Seeking by an unchecked uint->int cast can otherwise move
+                    // backwards and loop forever on a crafted RIFF file.
+                    if (nextChunkPosition <= chunkPosition || nextChunkPosition > streamLength)
+                        return null;
 
                     if (chunkId == fourCC)
                     {
-                        return new ChunkInfo { Id = chunkId, Size = (int)chunkSize };
+                        return new ChunkInfo { Id = chunkId, Size = chunkSize };
                     }
 
-                    // Skip to next chunk (align to 2-byte boundary)
-                    int skipSize = (int)chunkSize;
-                    if (skipSize % 2 != 0)
-                        skipSize++;
-
-                    stream.Seek(skipSize, 1, IntPtr.Zero); // STREAM_SEEK_CUR = 1
+                    // Seek absolutely so malformed relative sizes can never move backwards.
+                    stream.Seek(nextChunkPosition, 0, IntPtr.Zero);
+                    chunkPosition = nextChunkPosition;
                 }
+
+                return null;
             }
             catch (Exception ex)
             {
@@ -152,7 +169,7 @@ namespace Audex.FileReader
         private struct ChunkInfo
         {
             public string Id;
-            public int Size;
+            public long Size;
         }
     }
 }

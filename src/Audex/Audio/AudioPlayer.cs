@@ -80,6 +80,11 @@ namespace Audex.Audio
         /// <param name="deviceIndex">WASAPI output device index, or -1 for default.</param>
         public bool Initialize(int deviceIndex = -1)
         {
+            return BassLifetimeCoordinator.RunExclusive(() => InitializeCore(deviceIndex));
+        }
+
+        private bool InitializeCore(int deviceIndex)
+        {
             if (_isInitialized) return true;
 
             try
@@ -569,6 +574,11 @@ namespace Audex.Audio
         /// frees the mixer, and releases the BASS library.
         /// </summary>
         public void Shutdown()
+        {
+            BassLifetimeCoordinator.RunExclusive(ShutdownCore);
+        }
+
+        private void ShutdownCore()
         {
             if (!_isInitialized) return;
 

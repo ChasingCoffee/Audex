@@ -13,6 +13,8 @@ namespace Audex.Audio
     /// </summary>
     public static class BpmKeyAnalyzer
     {
+        private static readonly SemaphoreSlim AnalysisGate = new SemaphoreSlim(1, 1);
+
         /// <summary>
         /// Analyzes audio data for BPM (0-50% progress) then musical key (50-100% progress).
         /// </summary>
@@ -24,6 +26,36 @@ namespace Audex.Audio
         /// <returns>AnalysisResult with BPM, key, and confidence values; or null if cancelled.</returns>
         public static AnalysisResult? Analyze(byte[] audioData, CancellationToken ct,
             Action<float> onProgress, double maxSeconds = 300.0, string keyProfileType = "auto")
+        {
+            if (audioData == null) throw new ArgumentNullException(nameof(audioData));
+            if (onProgress == null) throw new ArgumentNullException(nameof(onProgress));
+            if (ct.IsCancellationRequested)
+                return null;
+
+            bool gateEntered = false;
+            try
+            {
+                AnalysisGate.Wait(ct);
+                gateEntered = true;
+
+                using (BassLifetimeCoordinator.EnterBackgroundWork())
+                {
+                    return AnalyzeCore(audioData, ct, onProgress, maxSeconds, keyProfileType);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return null;
+            }
+            finally
+            {
+                if (gateEntered)
+                    AnalysisGate.Release();
+            }
+        }
+
+        private static AnalysisResult? AnalyzeCore(byte[] audioData, CancellationToken ct,
+            Action<float> onProgress, double maxSeconds, string keyProfileType)
         {
             var result = new AnalysisResult();
 
@@ -58,12 +90,21 @@ namespace Audex.Audio
                     if (ct.IsCancellationRequested)
                     {
                         cancelled = true;
-                        return; // BPMDecodeGet completes but result will be discarded
+                        return;
                     }
                     onProgress((float)(percent * 0.005)); // 0-100 -> 0.0-0.5
                 };
 
-                float bpm = BassFx.BPMDecodeGet(stream, 0.0, endSec, 0, BassFlags.Default, bpmCallback, IntPtr.Zero);
+                float bpm;
+                int bpmStream = stream;
+                using (ct.Register(state =>
+                {
+                    try { BassFx.BPMFree((int)state!); } catch { }
+                }, bpmStream))
+                {
+                    bpm = BassFx.BPMDecodeGet(
+                        stream, 0.0, endSec, 0, BassFlags.Default, bpmCallback, IntPtr.Zero);
+                }
 
                 // Free the BPM stream before creating the key stream
                 Bass.StreamFree(stream);

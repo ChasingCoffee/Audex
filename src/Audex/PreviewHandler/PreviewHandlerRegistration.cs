@@ -71,11 +71,20 @@ namespace Audex.PreviewHandler
                     }
                 }
 
-                // Register file extension associations from config
-                List<string> extensions = ConfigManager.Load().SupportedExtensions;
-                foreach (string extension in extensions)
+                // The installation script owns extension registration so it can filter formats
+                // by the plugin DLLs actually present. Direct RegAsm usage retains the legacy
+                // behavior for administrators who intentionally invoke it themselves.
+                bool skipExtensionRegistration = string.Equals(
+                    Environment.GetEnvironmentVariable("AUDEX_SKIP_EXTENSION_REGISTRATION"),
+                    "1",
+                    StringComparison.Ordinal);
+                if (!skipExtensionRegistration)
                 {
-                    RegisterExtension(extension, clsid);
+                    List<string> extensions = ConfigManager.Load().SupportedExtensions;
+                    foreach (string extension in extensions)
+                    {
+                        RegisterExtension(extension, clsid);
+                    }
                 }
 
                 Logger.Info("Preview handler registration complete");

@@ -52,6 +52,18 @@ namespace Audex.Audio
             if (audioData == null || audioData.Length == 0)
                 return null;
 
+            using (BassLifetimeCoordinator.EnterBackgroundWork())
+            {
+                return GenerateCore(audioData, ct, isModuleFormat, onBarReady);
+            }
+        }
+
+        private static WaveformData? GenerateCore(byte[] audioData, CancellationToken ct,
+            bool isModuleFormat, Action<int, float>? onBarReady)
+        {
+            if (ct.IsCancellationRequested)
+                return null;
+
             GCHandle handle = GCHandle.Alloc(audioData, GCHandleType.Pinned);
             int waveStream = 0;
 
@@ -100,7 +112,7 @@ namespace Audex.Audio
                 int targetBars = (int)Math.Min(TargetBars, totalSampleFrames);
                 if (targetBars <= 0)
                 {
-                    Bass.StreamFree(waveStream);
+                    if (isModuleFormat) Bass.MusicFree(waveStream); else Bass.StreamFree(waveStream);
                     waveStream = 0;
                     handle.Free();
                     return null;

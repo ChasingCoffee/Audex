@@ -177,8 +177,8 @@ namespace Audex.UI
 
             using (Font titleFont = new Font("Segoe UI", 11.0f * dpiScale, FontStyle.Bold, GraphicsUnit.Pixel))
             using (Brush titleBrush = new SolidBrush(textColor))
+            using (StringFormat sf = new StringFormat { LineAlignment = StringAlignment.Center })
             {
-                StringFormat sf = new StringFormat { LineAlignment = StringAlignment.Center };
                 Rectangle titleRect = new Rectangle(x + pad, y, w - pad * 2 - closeBtnSize - pad, titleHeight);
                 g.DrawString("Settings", titleFont, titleBrush, titleRect, sf);
             }
@@ -248,13 +248,13 @@ namespace Audex.UI
                     Color itemTextColor = isSelected ? Color.White : textColor;
                     using (Font itemFont = new Font("Segoe UI", 9.0f * dpiScale, FontStyle.Regular, GraphicsUnit.Pixel))
                     using (Brush itemBrush = new SolidBrush(itemTextColor))
+                    using (StringFormat sf = new StringFormat
                     {
-                        StringFormat sf = new StringFormat
-                        {
-                            LineAlignment = StringAlignment.Center,
-                            Trimming = StringTrimming.EllipsisCharacter,
-                            FormatFlags = StringFormatFlags.NoWrap
-                        };
+                        LineAlignment = StringAlignment.Center,
+                        Trimming = StringTrimming.EllipsisCharacter,
+                        FormatFlags = StringFormatFlags.NoWrap
+                    })
+                    {
                         Rectangle textRect = new Rectangle(itemRect.X + (int)(6 * dpiScale), itemRect.Y,
                             itemRect.Width - (int)(12 * dpiScale), itemRect.Height);
                         g.DrawString(devices[i].Name, itemFont, itemBrush, textRect, sf);
@@ -266,8 +266,8 @@ namespace Audex.UI
             // "Takes effect on next file" note
             using (Font noteFont = new Font("Segoe UI", 8.0f * dpiScale, FontStyle.Italic, GraphicsUnit.Pixel))
             using (Brush noteBrush = new SolidBrush(Color.FromArgb(130, textColor.R, textColor.G, textColor.B)))
+            using (StringFormat sf = new StringFormat { LineAlignment = StringAlignment.Near })
             {
-                StringFormat sf = new StringFormat { LineAlignment = StringAlignment.Near };
                 g.DrawString("Takes effect on next file", noteFont, noteBrush,
                     new Rectangle(x + pad, y, w - pad * 2, (int)(16 * dpiScale)), sf);
             }
@@ -374,13 +374,13 @@ namespace Audex.UI
                     Color itemTextColor = isSelected ? Color.White : textColor;
                     using (Font itemFont = new Font("Segoe UI", 9.0f * dpiScale, FontStyle.Regular, GraphicsUnit.Pixel))
                     using (Brush itemBrush = new SolidBrush(itemTextColor))
+                    using (StringFormat sf = new StringFormat
                     {
-                        StringFormat sf = new StringFormat
-                        {
-                            LineAlignment = StringAlignment.Center,
-                            Trimming = StringTrimming.EllipsisCharacter,
-                            FormatFlags = StringFormatFlags.NoWrap
-                        };
+                        LineAlignment = StringAlignment.Center,
+                        Trimming = StringTrimming.EllipsisCharacter,
+                        FormatFlags = StringFormatFlags.NoWrap
+                    })
+                    {
                         Rectangle textRect = new Rectangle(itemRect.X + (int)(6 * dpiScale), itemRect.Y,
                             itemRect.Width - (int)(12 * dpiScale), itemRect.Height);
                         g.DrawString(KeyProfileOptions[i].Label, itemFont, itemBrush, textRect, sf);
@@ -519,8 +519,8 @@ namespace Audex.UI
         {
             using (Font hdrFont = new Font("Segoe UI", 8.5f * dpiScale, FontStyle.Bold, GraphicsUnit.Pixel))
             using (Brush hdrBrush = new SolidBrush(color))
+            using (StringFormat sf = new StringFormat { LineAlignment = StringAlignment.Center })
             {
-                StringFormat sf = new StringFormat { LineAlignment = StringAlignment.Center };
                 g.DrawString(title.ToUpperInvariant(), hdrFont, hdrBrush,
                     new Rectangle(x + pad, y, w - pad * 2, sectionHeaderHeight), sf);
             }
@@ -560,8 +560,8 @@ namespace Audex.UI
             // Label on the left
             using (Font f = new Font("Segoe UI", 9.0f * dpiScale, FontStyle.Regular, GraphicsUnit.Pixel))
             using (Brush b = new SolidBrush(textColor))
+            using (StringFormat sf = new StringFormat { LineAlignment = StringAlignment.Center })
             {
-                StringFormat sf = new StringFormat { LineAlignment = StringAlignment.Center };
                 Rectangle labelRect = new Rectangle(x + pad, y, w - pad * 3 - toggleWidth, rowHeight);
                 g.DrawString(label, f, b, labelRect, sf);
             }
@@ -613,13 +613,13 @@ namespace Audex.UI
             // Text
             using (Font f = new Font("Segoe UI", 9.0f * dpiScale, FontStyle.Regular, GraphicsUnit.Pixel))
             using (Brush b = new SolidBrush(textColor))
+            using (StringFormat sf = new StringFormat
             {
-                StringFormat sf = new StringFormat
-                {
-                    LineAlignment = StringAlignment.Center,
-                    Trimming = StringTrimming.EllipsisCharacter,
-                    FormatFlags = StringFormatFlags.NoWrap
-                };
+                LineAlignment = StringAlignment.Center,
+                Trimming = StringTrimming.EllipsisCharacter,
+                FormatFlags = StringFormatFlags.NoWrap
+            })
+            {
                 int arrowW = (int)(18 * dpiScale);
                 Rectangle textRect = new Rectangle(rect.X + (int)(6 * dpiScale), rect.Y,
                     rect.Width - arrowW - (int)(6 * dpiScale), rect.Height);
@@ -663,12 +663,12 @@ namespace Audex.UI
             }
             using (Font f = new Font("Segoe UI", 9.0f * dpiScale, FontStyle.Regular, GraphicsUnit.Pixel))
             using (Brush b = new SolidBrush(textColor))
+            using (StringFormat sf = new StringFormat
             {
-                StringFormat sf = new StringFormat
-                {
-                    Alignment = StringAlignment.Center,
-                    LineAlignment = StringAlignment.Center
-                };
+                Alignment = StringAlignment.Center,
+                LineAlignment = StringAlignment.Center
+            })
+            {
                 g.DrawString(text, f, b, rect, sf);
             }
         }

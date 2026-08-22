@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using Audex.FileReader;
 using FluentAssertions;
 using Xunit;
@@ -62,6 +63,38 @@ namespace Audex.Tests
             int read = StreamHelper.TryReadBytes(stream, buffer, 4);
 
             read.Should().Be(0);
+        }
+
+        [Fact]
+        public void ReadToEndBounded_UsesActualLengthWhenStatLengthIsTooSmall()
+        {
+            using var stream = new TestComStream(new byte[] { 1, 2, 3, 4, 5 });
+
+            byte[] data = StreamHelper.ReadToEndBounded(stream, declaredLength: 2, maxBytes: 10);
+
+            data.Should().Equal(1, 2, 3, 4, 5);
+        }
+
+        [Fact]
+        public void ReadToEndBounded_WhenActualContentExceedsLimit_Throws()
+        {
+            using var stream = new TestComStream(new byte[] { 1, 2, 3, 4, 5 });
+
+            Action act = () => StreamHelper.ReadToEndBounded(stream, declaredLength: 0, maxBytes: 4);
+
+            act.Should().Throw<InvalidDataException>()
+                .WithMessage("*exceeds the preview size limit*");
+        }
+
+        [Fact]
+        public void ReadToEndBounded_WhenDeclaredLengthExceedsLimit_RejectsBeforeReading()
+        {
+            using var stream = new TestComStream(new byte[] { 1, 2, 3 });
+
+            Action act = () => StreamHelper.ReadToEndBounded(stream, declaredLength: 100, maxBytes: 10);
+
+            act.Should().Throw<InvalidDataException>()
+                .WithMessage("*too large to preview*");
         }
     }
 }

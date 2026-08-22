@@ -71,6 +71,7 @@ namespace Audex.UI
         private bool _waveformUnavailable;        // True if generation failed
         private int _currentGenerationId;         // Incremented on each new file to prevent stale callbacks
         private System.Threading.CancellationTokenSource? _waveCts; // Cancels in-progress generation on file switch
+        private System.Threading.Thread? _waveThread;
 
         // --- Waveform interaction state ---
         private bool _isWaveformDragging;         // True during click-and-drag on waveform
@@ -96,6 +97,7 @@ namespace Audex.UI
         private bool _isReanalyzing;                    // True during re-analysis (dims old values)
         private int _currentAnalysisId;                 // Incremented on each new analysis to prevent stale callbacks
         private System.Threading.CancellationTokenSource? _analysisCts;
+        private System.Threading.Thread? _analysisThread;
         private DateTime _lastReanalyzeTime = DateTime.MinValue; // Cooldown tracking
         private const int ANALYSIS_DELAY_MS = 800;      // Delay before starting analysis
         private const int REANALYZE_COOLDOWN_MS = 2000;  // 2-second cooldown
@@ -674,93 +676,104 @@ namespace Audex.UI
             bool isModule = isModuleFormat;
 
             // Start background thread
-            System.Threading.Thread bgThread = new System.Threading.Thread(() =>
+            System.Threading.Thread? bgThread = null;
+            bgThread = new System.Threading.Thread(() =>
             {
-                // Pre-allocate peaks array on UI thread before starting; share the reference
-                float[] localPeaks = new float[2000];
-
-                // Batch progressive reveal: accumulate bars and invoke every ~50 bars
-                const int batchSize = 50;
-                int batchCount = 0;
-                int lastInvokedBar = -1;
-
-                Action<int, float> onBarReady = (barIndex, peak) =>
+                try
                 {
-                    if (ct.IsCancellationRequested) return;
-                    if (barIndex < localPeaks.Length)
-                        localPeaks[barIndex] = peak;
+                    // Pre-allocate one shared peaks array for progressive UI updates.
+                    float[] localPeaks = new float[2000];
 
-                    batchCount++;
-                    if (batchCount >= batchSize)
+                    // Batch progressive reveal: accumulate bars and invoke every ~50 bars
+                    const int batchSize = 50;
+                    int batchCount = 0;
+
+                    Action<int, float> onBarReady = (barIndex, peak) =>
                     {
-                        batchCount = 0;
-                        int capturedBar = barIndex;
+                        if (ct.IsCancellationRequested) return;
+                        if (barIndex < localPeaks.Length)
+                            localPeaks[barIndex] = peak;
+
+                        batchCount++;
+                        if (batchCount >= batchSize)
+                        {
+                            batchCount = 0;
+                            int capturedBar = barIndex;
+                            if (!IsHandleCreated || IsDisposed) return;
+                            try
+                            {
+                                BeginInvoke(new Action(() =>
+                                {
+                                    if (_currentGenerationId != generationId) return;
+                                    // Copy the batch into the shared peaks array
+                                    if (_waveformPeaks == null)
+                                        _waveformPeaks = localPeaks;
+                                    _waveformBarsReady = capturedBar + 1;
+                                    Invalidate(_waveformBounds);
+                                }));
+                            }
+                            catch { }
+                        }
+                    };
+
+                    WaveformData? result = WaveformGenerator.Generate(audioDataRef, ct, isModule, onBarReady);
+
+                    if (ct.IsCancellationRequested)
+                        return;
+
+                    // Generation complete (result may be null on failure)
+                    if (result != null)
+                    {
+                        float[] peaks = result.Peaks;
+
+                        // Write peaks cache
+                        try { WaveformCache.WriteCache(cacheKey, peaks); } catch { }
+                        // Write color cache
+                        if (result.FrequencyColors != null)
+                        {
+                            try { WaveformCache.WriteColorCache(cacheKey, result.FrequencyColors); } catch { }
+                        }
+
                         if (!IsHandleCreated || IsDisposed) return;
                         try
                         {
-                            Invoke(new Action(() =>
+                            BeginInvoke(new Action(() =>
                             {
                                 if (_currentGenerationId != generationId) return;
-                                // Copy the batch into the shared peaks array
-                                if (_waveformPeaks == null)
-                                    _waveformPeaks = localPeaks;
-                                _waveformBarsReady = capturedBar + 1;
+                                _waveformPeaks = peaks;
+                                _waveformBarsReady = peaks.Length;
+                                _waveformColors = result.FrequencyColors;
                                 Invalidate(_waveformBounds);
                             }));
                         }
                         catch { }
-                        lastInvokedBar = barIndex;
                     }
-                };
-
-                WaveformData? result = WaveformGenerator.Generate(audioDataRef, ct, isModule, onBarReady);
-
-                if (ct.IsCancellationRequested)
-                    return;
-
-                // Generation complete (result may be null on failure)
-                if (result != null)
-                {
-                    float[] peaks = result.Peaks;
-
-                    // Write peaks cache
-                    try { WaveformCache.WriteCache(cacheKey, peaks); } catch { }
-                    // Write color cache
-                    if (result.FrequencyColors != null)
+                    else
                     {
-                        try { WaveformCache.WriteColorCache(cacheKey, result.FrequencyColors); } catch { }
-                    }
-
-                    if (!IsHandleCreated || IsDisposed) return;
-                    try
-                    {
-                        Invoke(new Action(() =>
+                        // Generation failed (not cancelled)
+                        if (!IsHandleCreated || IsDisposed) return;
+                        try
                         {
-                            if (_currentGenerationId != generationId) return;
-                            _waveformPeaks = peaks;
-                            _waveformBarsReady = peaks.Length;
-                            _waveformColors = result.FrequencyColors;
-                            Invalidate(_waveformBounds);
-                        }));
+                            BeginInvoke(new Action(() =>
+                            {
+                                if (_currentGenerationId != generationId) return;
+                                _waveformUnavailable = true;
+                                Invalidate(_waveformBounds);
+                            }));
+                        }
+                        catch { }
                     }
-                    catch { }
                 }
-                else
+                catch (Exception ex)
                 {
-                    // Generation failed (not cancelled)
-                    if (!IsHandleCreated || IsDisposed) return;
-                    try
-                    {
-                        Invoke(new Action(() =>
-                        {
-                            if (_currentGenerationId != generationId) return;
-                            _waveformUnavailable = true;
-                            Invalidate(_waveformBounds);
-                        }));
-                    }
-                    catch { }
+                    Logger.Error($"[PreviewWindow] Waveform worker failed: {ex.Message}", ex);
+                }
+                finally
+                {
+                    System.Threading.Interlocked.CompareExchange(ref _waveThread, null, bgThread);
                 }
             });
+            _waveThread = bgThread;
             bgThread.IsBackground = true;
             bgThread.Start();
         }
@@ -783,7 +796,7 @@ namespace Audex.UI
         /// <summary>
         /// Starts background BPM/key analysis for the given audio data.
         /// Cancels any in-progress analysis first. Checks cache before analyzing.
-        /// Mirrors StartWaveformGeneration pattern: analysisId guard, CancellationToken, Invoke to UI thread.
+        /// Mirrors StartWaveformGeneration pattern: analysisId guard, CancellationToken, BeginInvoke to UI thread.
         /// </summary>
         /// <param name="audioData">Raw audio file bytes</param>
         /// <param name="isModuleFormat">True for .mod/.xm/.it/.s3m (skips analysis)</param>
@@ -849,57 +862,70 @@ namespace Audex.UI
             string capturedCacheKey = cacheKey;
             string capturedKeyProfile = keyProfile;
 
-            System.Threading.Thread bgThread = new System.Threading.Thread(() =>
+            System.Threading.Thread? bgThread = null;
+            bgThread = new System.Threading.Thread(() =>
             {
-                // Wait ANALYSIS_DELAY_MS before starting (cancellable delay)
-                bool cancelled = ct.WaitHandle.WaitOne(ANALYSIS_DELAY_MS);
-                if (cancelled || ct.IsCancellationRequested) return;
-
-                // Progress callback: batch UI updates (only when change >= 2%)
-                float lastReportedProgress = 0f;
-                Action<float> onProgress = (progress) =>
+                try
                 {
-                    if (ct.IsCancellationRequested) return;
-                    if (progress - lastReportedProgress < 0.02f && progress < 0.99f) return;
-                    lastReportedProgress = progress;
+                    // Wait ANALYSIS_DELAY_MS before starting (cancellable delay)
+                    bool cancelled = ct.WaitHandle.WaitOne(ANALYSIS_DELAY_MS);
+                    if (cancelled || ct.IsCancellationRequested) return;
 
+                    // Progress callback: batch UI updates (only when change >= 2%)
+                    float lastReportedProgress = 0f;
+                    Action<float> onProgress = (progress) =>
+                    {
+                        if (ct.IsCancellationRequested) return;
+                        if (progress - lastReportedProgress < 0.02f && progress < 0.99f) return;
+                        lastReportedProgress = progress;
+
+                        if (!IsHandleCreated || IsDisposed) return;
+                        try
+                        {
+                            BeginInvoke(new Action(() =>
+                            {
+                                if (_currentAnalysisId != analysisId) return;
+                                _analysisProgress = progress;
+                                Invalidate(_metadataBounds);
+                            }));
+                        }
+                        catch { }
+                    };
+
+                    // Run analysis (BPM + key phases)
+                    AnalysisResult? result = BpmKeyAnalyzer.Analyze(
+                        audioDataRef, ct, onProgress, 300.0, capturedKeyProfile);
+
+                    if (ct.IsCancellationRequested || result == null) return;
+
+                    // Cache even failures (so we don't re-analyze repeatedly)
+                    try { AnalysisCache.Write(capturedCacheKey, result); } catch { }
+
+                    // Marshal result to UI thread
                     if (!IsHandleCreated || IsDisposed) return;
                     try
                     {
-                        Invoke(new Action(() =>
+                        BeginInvoke(new Action(() =>
                         {
                             if (_currentAnalysisId != analysisId) return;
-                            _analysisProgress = progress;
+                            _analysisResult = result;
+                            _isAnalyzing = false;
+                            _isReanalyzing = false;
                             Invalidate(_metadataBounds);
                         }));
                     }
                     catch { }
-                };
-
-                // Run analysis (BPM + key phases)
-                AnalysisResult? result = BpmKeyAnalyzer.Analyze(
-                    audioDataRef, ct, onProgress, 300.0, capturedKeyProfile);
-
-                if (ct.IsCancellationRequested || result == null) return;
-
-                // Cache even failures (so we don't re-analyze repeatedly)
-                try { AnalysisCache.Write(capturedCacheKey, result); } catch { }
-
-                // Marshal result to UI thread
-                if (!IsHandleCreated || IsDisposed) return;
-                try
-                {
-                    Invoke(new Action(() =>
-                    {
-                        if (_currentAnalysisId != analysisId) return;
-                        _analysisResult = result;
-                        _isAnalyzing = false;
-                        _isReanalyzing = false;
-                        Invalidate(_metadataBounds);
-                    }));
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[PreviewWindow] Analysis worker failed: {ex.Message}", ex);
+                }
+                finally
+                {
+                    System.Threading.Interlocked.CompareExchange(ref _analysisThread, null, bgThread);
+                }
             });
+            _analysisThread = bgThread;
             bgThread.IsBackground = true;
             bgThread.Start();
         }
@@ -1962,6 +1988,7 @@ namespace Audex.UI
             {
                 CancelBpmKeyAnalysis();
                 CancelWaveformGeneration();
+                WaitForBackgroundWorkers();
                 StopLoading();
                 StopPositionTimer();
                 _positionTimer?.Dispose();
@@ -1982,6 +2009,21 @@ namespace Audex.UI
                 }
             }
             base.Dispose(disposing);
+        }
+
+        private void WaitForBackgroundWorkers()
+        {
+            JoinWorker(_analysisThread, "analysis");
+            JoinWorker(_waveThread, "waveform");
+        }
+
+        private static void JoinWorker(System.Threading.Thread? worker, string workerName)
+        {
+            if (worker == null || worker == System.Threading.Thread.CurrentThread || !worker.IsAlive)
+                return;
+
+            if (!worker.Join(millisecondsTimeout: 2000))
+                Logger.Warn($"[PreviewWindow] Timed out waiting for {workerName} worker shutdown");
         }
 
         // -------------------------------------------------------------------------

@@ -1,3 +1,6 @@
+using System;
+using System.Text;
+using System.Threading.Tasks;
 using Audex.FileReader;
 using FluentAssertions;
 using Xunit;
@@ -72,6 +75,29 @@ namespace Audex.Tests
             info.ParseSucceeded.Should().BeTrue();
             info.Format.Should().Be("AAC");
             info.FileSize.Should().Be(2048);
+        }
+
+        [Fact]
+        public async Task Parse_WavWithOverflowingChunkSize_ReturnsWithoutLooping()
+        {
+            byte[] data = new byte[20];
+            Encoding.ASCII.GetBytes("RIFF").CopyTo(data, 0);
+            BitConverter.GetBytes(12u).CopyTo(data, 4);
+            Encoding.ASCII.GetBytes("WAVE").CopyTo(data, 8);
+            Encoding.ASCII.GetBytes("JUNK").CopyTo(data, 12);
+            BitConverter.GetBytes(0xfffffff8u).CopyTo(data, 16);
+
+            Task<AudioFileInfo> parseTask = Task.Run(() =>
+            {
+                using var stream = new TestComStream(data);
+                return AudioHeaderParserFactory.Parse(stream, "crafted.wav", data.Length);
+            });
+
+            Task completedTask = await Task.WhenAny(parseTask, Task.Delay(TimeSpan.FromSeconds(1)));
+            completedTask.Should().BeSameAs(parseTask,
+                "a malformed RIFF chunk must never send the preview STA into an infinite seek loop");
+            AudioFileInfo info = await parseTask;
+            info.ParseSucceeded.Should().BeFalse();
         }
     }
 }
